@@ -1,0 +1,4 @@
+# Local runtime state (generated on the installed machine)
+state/
+config.ps1
+*.log
