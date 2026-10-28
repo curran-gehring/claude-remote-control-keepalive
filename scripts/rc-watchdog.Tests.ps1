@@ -47,6 +47,7 @@ Describe 'Invoke-ZombieReap with an unreadable session registry' {
     $statusFile  = Join-Path $TestDrive 'daemon.status.json'
     $sessionsDir = Join-Path $TestDrive 'sessions-broken'
     New-Item -ItemType Directory -Force $sessionsDir | Out-Null
+    '{"supervisorPid":4299,"workers":{}}' | Set-Content $statusFile
     '{"pid":4201,"kind":"inter' | Set-Content (Join-Path $sessionsDir '4201.json')   # mid-write
 
     Mock Get-NetTCPConnection { [pscustomobject]@{ State = 'CloseWait'; OwningProcess = 4201 } }
@@ -59,7 +60,7 @@ Describe 'Invoke-ZombieReap with an unreadable session registry' {
         Assert-MockCalled Stop-Process -Times 0 -Exactly
     }
     It 'logs why it skipped' {
-        Get-Content $logFile -Raw | Should Match 'skipping zombie reap'
+        Get-Content $logFile -Raw | Should Match 'skipping zombie reap, cannot read live sessions'
     }
 }
 
@@ -78,6 +79,26 @@ Describe 'Invoke-ZombieReap with an unreadable daemon status' {
 
     It 'reaps nothing when it cannot tell which pid is the supervisor' {
         Assert-MockCalled Stop-Process -Times 0 -Exactly
+    }
+}
+
+Describe 'Invoke-ZombieReap with no daemon status file' {
+    $logFile     = Join-Path $TestDrive 'rc-watchdog.log'
+    $statusFile  = Join-Path $TestDrive 'absent-daemon.status.json'
+    $sessionsDir = Join-Path $TestDrive 'sessions'
+    New-Item -ItemType Directory -Force $sessionsDir | Out-Null
+
+    Mock Get-NetTCPConnection { [pscustomobject]@{ State = 'CloseWait'; OwningProcess = 4401 } }
+    Mock Get-Process { [pscustomobject]@{ Id = $Id; Path = 'C:\tools\claude.exe'; StartTime = (Get-Date).AddHours(-1) } }
+    Mock Stop-Process {}
+
+    Invoke-ZombieReap -extraProtected @()
+
+    It 'reaps nothing when the supervisor pid is unknown' {
+        Assert-MockCalled Stop-Process -Times 0 -Exactly
+    }
+    It 'logs why it skipped' {
+        Get-Content $logFile -Raw | Should Match 'skipping zombie reap, cannot read daemon status'
     }
 }
 

@@ -88,11 +88,10 @@ function Invoke-ZombieReap {
 
     $protected = @{}
     foreach ($x in $extraProtected) { if ($x) { $protected[[int]$x] = $true } }
-    if (Test-Path -LiteralPath $statusFile) {   # no file = no daemon
-        try { $st = Get-Content -LiteralPath $statusFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
-        catch { Log "WARN: skipping zombie reap, cannot read daemon status: $_"; return }
-        if ($st.supervisorPid) { $protected[[int]$st.supervisorPid] = $true }
-    }
+    # Fail closed: without the status file we cannot tell which pid is the supervisor.
+    try { $st = Get-Content -LiteralPath $statusFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+    catch { Log "WARN: skipping zombie reap, cannot read daemon status: $_"; return }
+    if ($st.supervisorPid) { $protected[[int]$st.supervisorPid] = $true }
     try { $live = @(Get-LiveSessionPids -Dir $sessionsDir) }
     catch { Log "WARN: skipping zombie reap, cannot read live sessions: $_"; return }
     foreach ($x in $live) { $protected[$x] = $true }
