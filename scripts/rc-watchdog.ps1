@@ -29,6 +29,7 @@ $logFile     = Join-Path $stateDir 'rc-watchdog.log'
 $pidFile     = Join-Path $stateDir 'rc-server.pid'
 $startMarker = Join-Path $stateDir 'rc-server.laststart'
 $statusFile  = Join-Path $env:USERPROFILE '.claude\daemon.status.json'  # Claude's own daemon file (reaper protection)
+$sessionsDir = Join-Path $env:USERPROFILE '.claude\sessions'            # one <pid>.json per live session (reaper protection)
 
 function Log($msg) {
     $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
@@ -37,20 +38,6 @@ function Log($msg) {
 if ((Test-Path $logFile) -and (Get-Item $logFile).Length -gt 1MB) {
     Get-Content $logFile -Tail 200 | Set-Content $logFile
 }
-
-# ---------------- resolve the claude executable ----------------
-# Prefer the native claude.exe; if PATH only has a .cmd/.ps1 shim, find the exe beside it.
-$claudeExe = $null
-$cmd = Get-Command claude -ErrorAction SilentlyContinue
-if ($cmd) {
-    if ($cmd.Source -match '\.exe$') {
-        $claudeExe = $cmd.Source
-    } else {
-        $guess = Join-Path (Split-Path $cmd.Source) 'node_modules\@anthropic-ai\claude-code\bin\claude.exe'
-        $claudeExe = if (Test-Path $guess) { $guess } else { $cmd.Source }
-    }
-}
-if (-not $claudeExe) { Log 'ERROR: claude CLI not found on PATH'; exit 1 }
 
 # ---------------- helpers ----------------
 # Find a running remote-control SERVER by command line. Matches the `remote-control`
@@ -69,12 +56,28 @@ function Get-RcServer {
     }
 }
 
+# PIDs of live sessions, read from Claude's own session registry (~/.claude/sessions/<pid>.json,
+# the same pids `claude agents --json` reports). Never ask the CLI: a short-lived `claude`
+# command on this 5-minute timer can spend the OAuth refresh token and force a /login
+# (anthropics/claude-code#95822). Background agents have no pid there and none in `agents`.
+function Get-LiveSessionPids {
+    param([string] $Dir)
+    foreach ($f in @(Get-ChildItem -Path $Dir -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
+        try {
+            $s = Get-Content $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            if ($s.pid) { [int]$s.pid }
+        } catch {}
+    }
+}
+
 # Reap zombie claude.exe processes: after Remote Control's ~20-min idle timeout the
 # CLI's socket is left in TCP CloseWait and the process never reconnects; these pile
 # up over a long uptime. Kill ONLY clearly-dead ones, with safety gates so we never
 # touch a live session/server:
 #   - is a claude.exe, >=1 CloseWait AND 0 Established, older than 10 min
 #   - not the daemon supervisor / not a live interactive session / not the RC server
+# Every input comes from files and Get-Process; it never runs the claude CLI (see
+# Get-LiveSessionPids).
 function Invoke-ZombieReap {
     param([int[]] $extraProtected)
     $conns = $null
@@ -87,10 +90,7 @@ function Invoke-ZombieReap {
         $st = Get-Content $statusFile -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
         if ($st.supervisorPid) { $protected[[int]$st.supervisorPid] = $true }
     } catch {}
-    try {
-        $ag = & $claudeExe agents --json 2>$null | ConvertFrom-Json
-        foreach ($a in @($ag)) { if ($a.pid) { $protected[[int]$a.pid] = $true } }
-    } catch {}
+    foreach ($x in Get-LiveSessionPids -Dir $sessionsDir) { $protected[$x] = $true }
 
     $byPid = @{}
     foreach ($c in $conns) {
@@ -112,6 +112,23 @@ function Invoke-ZombieReap {
         }
     }
 }
+
+# Dot-sourcing (the Pester tests) loads the helpers above and stops here.
+if ($MyInvocation.InvocationName -eq '.') { return }
+
+# ---------------- resolve the claude executable ----------------
+# Prefer the native claude.exe; if PATH only has a .cmd/.ps1 shim, find the exe beside it.
+$claudeExe = $null
+$cmd = Get-Command claude -ErrorAction SilentlyContinue
+if ($cmd) {
+    if ($cmd.Source -match '\.exe$') {
+        $claudeExe = $cmd.Source
+    } else {
+        $guess = Join-Path (Split-Path $cmd.Source) 'node_modules\@anthropic-ai\claude-code\bin\claude.exe'
+        $claudeExe = if (Test-Path $guess) { $guess } else { $cmd.Source }
+    }
+}
+if (-not $claudeExe) { Log 'ERROR: claude CLI not found on PATH'; exit 1 }
 
 # ---------------- ensure the server is running ----------------
 # Primary health check = PID FILE + Get-Process (reliable). CommandLine scan is only
