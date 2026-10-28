@@ -66,11 +66,22 @@ function Get-LiveSessionPids {
     param([string] $Dir)
     if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { throw "session registry not found: $Dir" }
     foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Filter '*.json' -File -ErrorAction Stop)) {
-        try { $s = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
-        catch { throw "unreadable session file $($f.Name): $_" }
-        if (-not $s.pid) { throw "session file has no pid: $($f.Name)" }
-        [int]$s.pid
+        try {
+            $s = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+            ConvertTo-Pid $s.pid
+        } catch { throw "unreadable session file $($f.Name): $_" }
     }
+}
+
+# A pid read from a file, as an [int]; throws unless it is a positive whole number.
+# A bare [int] cast would turn 12.5 into 12 and accept -3, protecting the wrong process.
+function ConvertTo-Pid {
+    param($Value)
+    $n = 0L
+    if (-not [long]::TryParse("$Value", [ref]$n) -or $n -le 0 -or $n -gt [int]::MaxValue) {
+        throw "not a pid: '$Value'"
+    }
+    return [int]$n
 }
 
 # Every pid the reaper must never touch: the extra pids passed in, the daemon supervisor
@@ -82,8 +93,8 @@ function Get-ProtectedPids {
     foreach ($x in $extraProtected) { if ($x) { $protected[[int]$x] = $true } }
     try { $st = Get-Content -LiteralPath $statusFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
     catch { throw "unreadable daemon status ${statusFile}: $_" }
-    if (-not $st.supervisorPid) { throw "daemon status names no supervisorPid: $statusFile" }
-    $protected[[int]$st.supervisorPid] = $true
+    try { $protected[(ConvertTo-Pid $st.supervisorPid)] = $true }
+    catch { throw "daemon status names no valid supervisorPid ${statusFile}: $_" }
     foreach ($x in Get-LiveSessionPids -Dir $sessionsDir) { $protected[$x] = $true }
     return $protected
 }

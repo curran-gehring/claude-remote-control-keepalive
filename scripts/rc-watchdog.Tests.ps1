@@ -169,4 +169,45 @@ Describe 'Get-LiveSessionPids' {
         '{"kind":"interactive"}' | Set-Content (Join-Path $nopid '44.json')
         { Get-LiveSessionPids -Dir $nopid } | Should Throw
     }
+    foreach ($case in @(
+        @{ name = 'a non-numeric pid'; json = '{"pid":"abc"}' }
+        @{ name = 'a fractional pid';  json = '{"pid":12.5}' }
+        @{ name = 'a negative pid';    json = '{"pid":-3}' }
+    )) {
+        It "throws on a file with $($case.name), naming the file" {
+            $d = Join-Path $TestDrive ([guid]::NewGuid())
+            New-Item -ItemType Directory -Force $d | Out-Null
+            $case.json | Set-Content (Join-Path $d '55.json')
+            { Get-LiveSessionPids -Dir $d } | Should Throw '55.json'
+        }
+    }
+}
+
+Describe 'ConvertTo-Pid' {
+    It 'accepts a positive whole number' {
+        ConvertTo-Pid 4321 | Should Be 4321
+    }
+    foreach ($bad in @('abc', 12.5, -3, 0, $null, 99999999999)) {
+        It "rejects '$bad'" {
+            { ConvertTo-Pid $bad } | Should Throw
+        }
+    }
+}
+
+Describe 'Invoke-ZombieReap with a fractional supervisorPid' {
+    $logFile     = Join-Path $TestDrive 'rc-watchdog.log'
+    $statusFile  = Join-Path $TestDrive 'daemon.status.json'
+    $sessionsDir = Join-Path $TestDrive 'sessions'
+    New-Item -ItemType Directory -Force $sessionsDir | Out-Null
+    '{"supervisorPid":4799.5,"workers":{}}' | Set-Content $statusFile
+
+    Mock Get-NetTCPConnection { [pscustomobject]@{ State = 'CloseWait'; OwningProcess = 4801 } }
+    Mock Get-Process { [pscustomobject]@{ Id = $Id; Path = 'C:\tools\claude.exe'; StartTime = (Get-Date).AddHours(-1) } }
+    Mock Stop-Process {}
+
+    Invoke-ZombieReap -extraProtected @()
+
+    It 'reaps nothing' {
+        Assert-MockCalled Stop-Process -Times 0 -Exactly
+    }
 }
