@@ -60,7 +60,7 @@ Describe 'Invoke-ZombieReap with an unreadable session registry' {
         Assert-MockCalled Stop-Process -Times 0 -Exactly
     }
     It 'logs why it skipped' {
-        Get-Content $logFile -Raw | Should Match 'skipping zombie reap, cannot read live sessions'
+        Get-Content $logFile -Raw | Should Match 'skipping zombie reap.*session file 4201\.json'
     }
 }
 
@@ -98,7 +98,50 @@ Describe 'Invoke-ZombieReap with no daemon status file' {
         Assert-MockCalled Stop-Process -Times 0 -Exactly
     }
     It 'logs why it skipped' {
-        Get-Content $logFile -Raw | Should Match 'skipping zombie reap, cannot read daemon status'
+        Get-Content $logFile -Raw | Should Match 'skipping zombie reap.*daemon status'
+    }
+}
+
+Describe 'Invoke-ZombieReap with a daemon status that names no supervisor' {
+    $logFile     = Join-Path $TestDrive 'rc-watchdog.log'
+    $statusFile  = Join-Path $TestDrive 'daemon.status.json'
+    $sessionsDir = Join-Path $TestDrive 'sessions'
+    New-Item -ItemType Directory -Force $sessionsDir | Out-Null
+    '{"workers":{}}' | Set-Content $statusFile
+
+    Mock Get-NetTCPConnection { [pscustomobject]@{ State = 'CloseWait'; OwningProcess = 4501 } }
+    Mock Get-Process { [pscustomobject]@{ Id = $Id; Path = 'C:\tools\claude.exe'; StartTime = (Get-Date).AddHours(-1) } }
+    Mock Stop-Process {}
+
+    Invoke-ZombieReap -extraProtected @()
+
+    It 'reaps nothing' {
+        Assert-MockCalled Stop-Process -Times 0 -Exactly
+    }
+    It 'logs why it skipped' {
+        Get-Content $logFile -Raw | Should Match 'skipping zombie reap.*supervisorPid'
+    }
+}
+
+Describe 'Invoke-ZombieReap when a session registers between the read and the kill' {
+    $logFile     = Join-Path $TestDrive 'rc-watchdog.log'
+    $statusFile  = Join-Path $TestDrive 'daemon.status.json'
+    $sessionsDir = Join-Path $TestDrive 'sessions'
+    New-Item -ItemType Directory -Force $sessionsDir | Out-Null
+    '{"supervisorPid":4699,"workers":{}}' | Set-Content $statusFile
+
+    # First read: no sessions. Every later read: pid 4601 has registered.
+    $script:reads = 0
+    Mock Get-LiveSessionPids { $script:reads++; if ($script:reads -gt 1) { 4601 } }
+    Mock Get-NetTCPConnection { [pscustomobject]@{ State = 'CloseWait'; OwningProcess = 4601 } }
+    Mock Get-Process { [pscustomobject]@{ Id = $Id; Path = 'C:\tools\claude.exe'; StartTime = (Get-Date).AddHours(-1) } }
+    Mock Stop-Process {}
+
+    Invoke-ZombieReap -extraProtected @()
+
+    It 're-reads the protected pids before killing and spares the new session' {
+        Assert-MockCalled Stop-Process -Times 0 -Exactly
+        $script:reads | Should BeGreaterThan 1
     }
 }
 
@@ -114,11 +157,11 @@ Describe 'Get-LiveSessionPids' {
     It 'throws when the directory is missing' {
         { Get-LiveSessionPids -Dir (Join-Path $TestDrive 'absent') } | Should Throw
     }
-    It 'throws on a file that is not JSON' {
+    It 'throws on a file that is not JSON, naming the file' {
         $bad = Join-Path $TestDrive 'bad'
         New-Item -ItemType Directory -Force $bad | Out-Null
         'not json' | Set-Content (Join-Path $bad '33.json')
-        { Get-LiveSessionPids -Dir $bad } | Should Throw
+        { Get-LiveSessionPids -Dir $bad } | Should Throw '33.json'
     }
     It 'throws on a file without a pid' {
         $nopid = Join-Path $TestDrive 'nopid'

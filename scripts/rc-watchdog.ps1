@@ -66,10 +66,26 @@ function Get-LiveSessionPids {
     param([string] $Dir)
     if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { throw "session registry not found: $Dir" }
     foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Filter '*.json' -File -ErrorAction Stop)) {
-        $s = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        try { $s = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        catch { throw "unreadable session file $($f.Name): $_" }
         if (-not $s.pid) { throw "session file has no pid: $($f.Name)" }
         [int]$s.pid
     }
+}
+
+# Every pid the reaper must never touch: the extra pids passed in, the daemon supervisor
+# (daemon.status.json) and every live session (Get-LiveSessionPids). Throws when any
+# source is missing or unreadable, or names no supervisor; the caller then skips reaping.
+function Get-ProtectedPids {
+    param([int[]] $extraProtected)
+    $protected = @{}
+    foreach ($x in $extraProtected) { if ($x) { $protected[[int]$x] = $true } }
+    try { $st = Get-Content -LiteralPath $statusFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+    catch { throw "unreadable daemon status ${statusFile}: $_" }
+    if (-not $st.supervisorPid) { throw "daemon status names no supervisorPid: $statusFile" }
+    $protected[[int]$st.supervisorPid] = $true
+    foreach ($x in Get-LiveSessionPids -Dir $sessionsDir) { $protected[$x] = $true }
+    return $protected
 }
 
 # Reap zombie claude.exe processes: after Remote Control's ~20-min idle timeout the
@@ -79,22 +95,15 @@ function Get-LiveSessionPids {
 #   - is a claude.exe, >=1 CloseWait AND 0 Established, older than 10 min
 #   - not the daemon supervisor / not a live interactive session / not the RC server
 # Every input comes from files and Get-Process; it never runs the claude CLI (see
-# Get-LiveSessionPids).
+# Get-ProtectedPids).
 function Invoke-ZombieReap {
     param([int[]] $extraProtected)
     $conns = $null
     try { $conns = Get-NetTCPConnection -ErrorAction SilentlyContinue } catch { return }
     if (-not $conns) { return }
 
-    $protected = @{}
-    foreach ($x in $extraProtected) { if ($x) { $protected[[int]$x] = $true } }
-    # Fail closed: without the status file we cannot tell which pid is the supervisor.
-    try { $st = Get-Content -LiteralPath $statusFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
-    catch { Log "WARN: skipping zombie reap, cannot read daemon status: $_"; return }
-    if ($st.supervisorPid) { $protected[[int]$st.supervisorPid] = $true }
-    try { $live = @(Get-LiveSessionPids -Dir $sessionsDir) }
-    catch { Log "WARN: skipping zombie reap, cannot read live sessions: $_"; return }
-    foreach ($x in $live) { $protected[$x] = $true }
+    try { $protected = Get-ProtectedPids -extraProtected $extraProtected }
+    catch { Log "WARN: skipping zombie reap: $_"; return }
 
     $byPid = @{}
     foreach ($c in $conns) {
@@ -110,6 +119,10 @@ function Invoke-ZombieReap {
         $s = $byPid[$opid]
         $ageMin = ((Get-Date) - $s.start).TotalMinutes
         if ($s.cw -ge 1 -and $s.est -eq 0 -and $ageMin -gt 10) {
+            # Re-read right before the kill: a session registered since the first read lives.
+            try { $now = Get-ProtectedPids -extraProtected $extraProtected }
+            catch { Log "WARN: skipping zombie reap: $_"; return }
+            if ($now.ContainsKey($opid)) { continue }
             try { Stop-Process -Id $opid -Force -ErrorAction Stop
                   Log ("reaped zombie claude.exe pid={0} (CloseWait={1}, Established=0, age={2:n0}m)" -f $opid, $s.cw, $ageMin)
             } catch { Log "WARN: failed to reap pid=$opid : $_" }

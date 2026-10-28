@@ -15,7 +15,7 @@ paths: scripts/rc-watchdog.ps1
 - Any command-line match for the server uses `(?<!-)remote-control`, the subcommand only. Interactive sessions carry the `--remote-control` flag, and a plain `-match 'remote-control'` matches every one of them.
 - Keep the 90-second `rc-server.laststart` grace window before starting another server; a fresh server takes 15 to 60 seconds to connect.
 - The zombie reaper kills a `claude.exe` only when it has at least one `CloseWait` connection, zero `Established`, and is older than 10 minutes, and never the tracked server PID, a discovered server, the daemon supervisor, or a live agent. Do not loosen any of those conditions, and do not reap by process age or name alone.
-- The protected list fails closed. When `~/.claude/sessions` or `daemon.status.json` cannot be read (missing, or a file caught mid-write), skip that cycle's reap. Never treat an unreadable source as "nothing to protect"; review caught a swallowed `catch {}` there that would have let a live session look like a zombie.
+- The protected list fails closed. When `~/.claude/sessions` or `daemon.status.json` cannot be read (missing, a file caught mid-write, or a status that names no `supervisorPid`), skip that cycle's reap. Re-read the protected pids (`Get-ProtectedPids`) right before each `Stop-Process`, not only once per cycle. Never treat an unreadable source as "nothing to protect"; review caught a swallowed `catch {}` there that would have let a live session look like a zombie.
 
 ## Hidden launcher
 paths: scripts/run-hidden.vbs
