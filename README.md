@@ -92,7 +92,9 @@ your PC with your privileges. Use it only on a machine you control and trust. Th
      `claude remote-control --name <Name> --permission-mode <mode>` in `<WorkDir>`, hidden, and
      records its PID.
   3. Reaps dead `claude.exe` zombies (only ones in `CloseWait` with zero live connections,
-     >10 min old, and never the server, the daemon, or a live interactive session).
+     >10 min old, and never the server, the daemon, or a live interactive session). Live
+     sessions come from `~/.claude/sessions/<pid>.json`, not the `claude` CLI; if that registry
+     can't be read, the reaper skips the cycle.
 - Files live in `%USERPROFILE%\.claude-rc-keepalive\` (`rc-watchdog.ps1`, `run-hidden.vbs`,
   `config.ps1`, and `state\` with the log + PID file).
 

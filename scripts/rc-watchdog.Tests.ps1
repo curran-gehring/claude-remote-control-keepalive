@@ -10,7 +10,6 @@ Describe 'Invoke-ZombieReap' {
     New-Item -ItemType Directory -Force $sessionsDir | Out-Null
     "{`"supervisorPid`":$supervisor,`"workers`":{}}" | Set-Content $statusFile
     "{`"pid`":$session,`"kind`":`"interactive`",`"status`":`"idle`"}" | Set-Content (Join-Path $sessionsDir "$session.json")
-    'not json' | Set-Content (Join-Path $sessionsDir 'broken.json')
 
     # Stand-in for the claude CLI: leaves a marker if anything launches it.
     $marker = Join-Path $TestDrive 'claude-was-run'
@@ -43,17 +42,67 @@ Describe 'Invoke-ZombieReap' {
     }
 }
 
+Describe 'Invoke-ZombieReap with an unreadable session registry' {
+    $logFile     = Join-Path $TestDrive 'rc-watchdog.log'
+    $statusFile  = Join-Path $TestDrive 'daemon.status.json'
+    $sessionsDir = Join-Path $TestDrive 'sessions-broken'
+    New-Item -ItemType Directory -Force $sessionsDir | Out-Null
+    '{"pid":4201,"kind":"inter' | Set-Content (Join-Path $sessionsDir '4201.json')   # mid-write
+
+    Mock Get-NetTCPConnection { [pscustomobject]@{ State = 'CloseWait'; OwningProcess = 4201 } }
+    Mock Get-Process { [pscustomobject]@{ Id = $Id; Path = 'C:\tools\claude.exe'; StartTime = (Get-Date).AddHours(-1) } }
+    Mock Stop-Process {}
+
+    Invoke-ZombieReap -extraProtected @()
+
+    It 'reaps nothing when it cannot tell which sessions are live' {
+        Assert-MockCalled Stop-Process -Times 0 -Exactly
+    }
+    It 'logs why it skipped' {
+        Get-Content $logFile -Raw | Should Match 'skipping zombie reap'
+    }
+}
+
+Describe 'Invoke-ZombieReap with an unreadable daemon status' {
+    $logFile     = Join-Path $TestDrive 'rc-watchdog.log'
+    $statusFile  = Join-Path $TestDrive 'daemon.status.json'
+    $sessionsDir = Join-Path $TestDrive 'sessions'
+    New-Item -ItemType Directory -Force $sessionsDir | Out-Null
+    '{"supervisorPid":43' | Set-Content $statusFile   # mid-write
+
+    Mock Get-NetTCPConnection { [pscustomobject]@{ State = 'CloseWait'; OwningProcess = 4301 } }
+    Mock Get-Process { [pscustomobject]@{ Id = $Id; Path = 'C:\tools\claude.exe'; StartTime = (Get-Date).AddHours(-1) } }
+    Mock Stop-Process {}
+
+    Invoke-ZombieReap -extraProtected @()
+
+    It 'reaps nothing when it cannot tell which pid is the supervisor' {
+        Assert-MockCalled Stop-Process -Times 0 -Exactly
+    }
+}
+
 Describe 'Get-LiveSessionPids' {
+    $dir = Join-Path $TestDrive 'sessions'
+    New-Item -ItemType Directory -Force $dir | Out-Null
+    '{"pid":11,"kind":"interactive"}' | Set-Content (Join-Path $dir '11.json')
+    '{"pid":22,"kind":"interactive"}' | Set-Content (Join-Path $dir '22.json')
+
     It 'returns the pid of every session file' {
-        $dir = Join-Path $TestDrive 'sessions'
-        New-Item -ItemType Directory -Force $dir | Out-Null
-        '{"pid":11,"kind":"interactive"}' | Set-Content (Join-Path $dir '11.json')
-        '{"pid":22,"kind":"interactive"}' | Set-Content (Join-Path $dir '22.json')
-        '{"kind":"interactive"}'          | Set-Content (Join-Path $dir 'nopid.json')
-        'not json'                         | Set-Content (Join-Path $dir 'broken.json')
         @(Get-LiveSessionPids -Dir $dir | Sort-Object) -join ',' | Should Be '11,22'
     }
-    It 'returns nothing when the directory is missing' {
-        @(Get-LiveSessionPids -Dir (Join-Path $TestDrive 'absent')).Count | Should Be 0
+    It 'throws when the directory is missing' {
+        { Get-LiveSessionPids -Dir (Join-Path $TestDrive 'absent') } | Should Throw
+    }
+    It 'throws on a file that is not JSON' {
+        $bad = Join-Path $TestDrive 'bad'
+        New-Item -ItemType Directory -Force $bad | Out-Null
+        'not json' | Set-Content (Join-Path $bad '33.json')
+        { Get-LiveSessionPids -Dir $bad } | Should Throw
+    }
+    It 'throws on a file without a pid' {
+        $nopid = Join-Path $TestDrive 'nopid'
+        New-Item -ItemType Directory -Force $nopid | Out-Null
+        '{"kind":"interactive"}' | Set-Content (Join-Path $nopid '44.json')
+        { Get-LiveSessionPids -Dir $nopid } | Should Throw
     }
 }

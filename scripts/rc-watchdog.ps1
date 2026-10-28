@@ -60,13 +60,15 @@ function Get-RcServer {
 # the same pids `claude agents --json` reports). Never ask the CLI: a short-lived `claude`
 # command on this 5-minute timer can spend the OAuth refresh token and force a /login
 # (anthropics/claude-code#95822). Background agents have no pid there and none in `agents`.
+# Throws when the registry is missing or any file is unreadable (e.g. mid-write): a
+# session we cannot see must never look like a zombie.
 function Get-LiveSessionPids {
     param([string] $Dir)
-    foreach ($f in @(Get-ChildItem -Path $Dir -Filter '*.json' -File -ErrorAction SilentlyContinue)) {
-        try {
-            $s = Get-Content $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
-            if ($s.pid) { [int]$s.pid }
-        } catch {}
+    if (-not (Test-Path -LiteralPath $Dir -PathType Container)) { throw "session registry not found: $Dir" }
+    foreach ($f in @(Get-ChildItem -LiteralPath $Dir -Filter '*.json' -File -ErrorAction Stop)) {
+        $s = Get-Content -LiteralPath $f.FullName -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+        if (-not $s.pid) { throw "session file has no pid: $($f.Name)" }
+        [int]$s.pid
     }
 }
 
@@ -86,11 +88,14 @@ function Invoke-ZombieReap {
 
     $protected = @{}
     foreach ($x in $extraProtected) { if ($x) { $protected[[int]$x] = $true } }
-    try {
-        $st = Get-Content $statusFile -Raw -ErrorAction SilentlyContinue | ConvertFrom-Json
+    if (Test-Path -LiteralPath $statusFile) {   # no file = no daemon
+        try { $st = Get-Content -LiteralPath $statusFile -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop }
+        catch { Log "WARN: skipping zombie reap, cannot read daemon status: $_"; return }
         if ($st.supervisorPid) { $protected[[int]$st.supervisorPid] = $true }
-    } catch {}
-    foreach ($x in Get-LiveSessionPids -Dir $sessionsDir) { $protected[$x] = $true }
+    }
+    try { $live = @(Get-LiveSessionPids -Dir $sessionsDir) }
+    catch { Log "WARN: skipping zombie reap, cannot read live sessions: $_"; return }
+    foreach ($x in $live) { $protected[$x] = $true }
 
     $byPid = @{}
     foreach ($c in $conns) {
